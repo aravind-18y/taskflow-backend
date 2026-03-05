@@ -8,8 +8,7 @@ import os
 from functools import wraps
 
 app = Flask(__name__)
-CORS(app, resources={
-     r"/*": {"origins": "https://taskflow-frontend-chi.vercel.app"}})
+CORS(app, resources={r"/*": {"origins": "https://taskflow-frontend-chi.vercel.app"}})
 bcrypt = Bcrypt(app)
 app.config['SECRET_KEY'] = 'taskflow_final_secure_2026'
 
