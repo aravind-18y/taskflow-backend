@@ -1,27 +1,33 @@
-from flask import Flask, jsonify, request
-from flask_cors import CORS
+import os
+import datetime
+import jwt
+from flask import Flask, request, jsonify
 from flask_sqlalchemy import SQLAlchemy
 from flask_bcrypt import Bcrypt
-import jwt
-import datetime
-import os
+from flask_cors import CORS
 from functools import wraps
 
 app = Flask(__name__)
-CORS(app, resources={
-     r"/*": {"origins": "https://taskflow-frontend-chi.vercel.app"}})
-bcrypt = Bcrypt(app)
-app.config['SECRET_KEY'] = 'taskflow_final_secure_2026'
 
-# Database Setup
-basedir = os.path.abspath(os.path.dirname(__file__))
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///' + \
-    os.path.join(basedir, 'tasks.db')
+# --- CONFIGURATION ---
+# 1. SECRET_KEY: Use environment variable or a fallback
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'taskflow_secure_2026')
+
+# 2. DATABASE: Switch to PostgreSQL if DATABASE_URL exists (Render), else use SQLite
+db_url = os.environ.get('DATABASE_URL', 'sqlite:///tasks.db')
+if db_url.startswith("postgres://"):
+    db_url = db_url.replace("postgres://", "postgresql://", 1)
+app.config['SQLALCHEMY_DATABASE_URI'] = db_url
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
-db = SQLAlchemy(app)
+# 3. CORS: Replace with your ACTUAL Vercel URL
+CORS(app, resources={
+     r"/*": {"origins": "https://taskflow-frontend-chi.vercel.app"}})
 
-# Models
+db = SQLAlchemy(app)
+bcrypt = Bcrypt(app)
+
+# --- MODELS ---
 
 
 class User(db.Model):
@@ -33,18 +39,17 @@ class User(db.Model):
 
 class Task(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    title = db.Column(db.String(100), nullable=False)
-    status = db.Column(db.String(20), default="In Progress")
-    due_date = db.Column(db.String(50), nullable=True)
-    priority = db.Column(db.String(10), default="Medium")
-    category = db.Column(db.String(20), default="Personal")
+    title = db.Column(db.String(200), nullable=False)
+    status = db.Column(db.String(20), default="Pending")
+    priority = db.Column(db.String(20), default="Medium")
+    category = db.Column(db.String(50), default="Personal")
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
 
 
 with app.app_context():
     db.create_all()
 
-# Auth Decorator
+# --- AUTH DECORATOR ---
 
 
 def token_required(f):
@@ -52,91 +57,86 @@ def token_required(f):
     def decorated(*args, **kwargs):
         token = request.headers.get('x-access-token')
         if not token:
-            return jsonify({'message': 'Token missing'}), 401
+            return jsonify({'message': 'Token is missing!'}), 401
         try:
             data = jwt.decode(
                 token, app.config['SECRET_KEY'], algorithms=["HS256"])
-            current_user = User.query.get(data['user_id'])
+            current_user = User.query.filter_by(id=data['user_id']).first()
         except:
-            return jsonify({'message': 'Token invalid'}), 401
+            return jsonify({'message': 'Token is invalid!'}), 401
         return f(current_user, *args, **kwargs)
     return decorated
+
+# --- ROUTES ---
 
 
 @app.route('/register', methods=['POST'])
 def register():
-    data = request.json
-    if User.query.filter_by(username=data['username']).first():
+    data = request.get_json()
+    hashed_password = bcrypt.generate_password_hash(
+        data['password']).decode('utf-8')
+    new_user = User(username=data['username'], password=hashed_password)
+    try:
+        db.session.add(new_user)
+        db.session.commit()
+        return jsonify({'message': 'Registered successfully'}), 201
+    except:
         return jsonify({'message': 'User already exists'}), 400
-    hashed_pw = bcrypt.generate_password_hash(data['password']).decode('utf-8')
-    new_user = User(username=data['username'], password=hashed_pw)
-    db.session.add(new_user)
-    db.session.commit()
-    return jsonify({'message': 'Registered successfully'}), 201
 
 
 @app.route('/login', methods=['POST'])
 def login():
-    data = request.json
+    data = request.get_json()
     user = User.query.filter_by(username=data['username']).first()
-    # Corrected check_password_hash
+    # FIXED: check_password_hash (Correct function name)
     if user and bcrypt.check_password_hash(user.password, data['password']):
-        token = jwt.encode({'user_id': user.id, 'exp': datetime.datetime.utcnow(
-        ) + datetime.timedelta(hours=24)}, app.config['SECRET_KEY'], algorithm="HS256")
-        return jsonify({'token': token, 'username': user.username})
-    return jsonify({'message': 'Login failed'}), 401
+        token = jwt.encode({
+            'user_id': user.id,
+            'exp': datetime.datetime.utcnow() + datetime.timedelta(hours=24)
+        }, app.config['SECRET_KEY'], algorithm="HS256")
+        return jsonify({'token': token, 'username': user.username}), 200
+    return jsonify({'message': 'Invalid credentials'}), 401
 
 
-@app.route("/analytics", methods=["GET"])
+@app.route('/tasks', methods=['GET'])
 @token_required
-def get_analytics(current_user):
+def get_tasks(current_user):
     tasks = Task.query.filter_by(user_id=current_user.id).all()
-    total = len(tasks)
-    cat_counts = {}
-    for t in tasks:
-        cat_counts[t.category] = cat_counts.get(t.category, 0) + 1
-    completed = len([t for t in tasks if t.status == "Completed"])
-    rate = round((completed / total * 100), 1) if total > 0 else 0
-    return jsonify({
-        "rate": rate,
-        "completionData": [{"name": "Done", "value": completed, "fill": "#10b981"}, {"name": "Pending", "value": total-completed, "fill": "#6366f1"}],
-        "categoryData": [{"name": k, "value": v} for k, v in cat_counts.items()],
-        "metrics": [{"label": "Productivity Score", "value": f"{rate}%"}, {"label": "Active Tasks", "value": total-completed}, {"label": "Goals Met", "value": completed}]
-    })
+    return jsonify([{'id': t.id, 'title': t.title, 'status': t.status, 'priority': t.priority, 'category': t.category} for t in tasks])
 
 
-@app.route("/tasks", methods=["GET", "POST"])
+@app.route('/tasks', methods=['POST'])
 @token_required
-def manage_tasks(current_user):
-    if request.method == "GET":
-        tasks = Task.query.filter_by(user_id=current_user.id).all()
-        return jsonify([{"id": t.id, "title": t.title, "status": t.status, "due_date": t.due_date, "priority": t.priority, "category": t.category} for t in tasks])
-    data = request.json
-    new_task = Task(title=data.get('title'), due_date=data.get('due_date'), priority=data.get(
-        'priority', 'Medium'), category=data.get('category', 'Personal'), user_id=current_user.id)
+def create_task(current_user):
+    data = request.get_json()
+    new_task = Task(title=data['title'], priority=data.get('priority', 'Medium'),
+                    category=data.get('category', 'Personal'), user_id=current_user.id)
     db.session.add(new_task)
     db.session.commit()
-    return jsonify({"id": new_task.id, "title": new_task.title}), 201
+    return jsonify({'id': new_task.id, 'title': new_task.title, 'status': new_task.status}), 201
 
 
-@app.route("/tasks/<int:task_id>/toggle", methods=["PUT"])
+@app.route('/tasks/<int:id>/toggle', methods=['PUT'])
 @token_required
-def toggle(current_user, task_id):
-    task = Task.query.filter_by(id=task_id, user_id=current_user.id).first()
-    task.status = "Completed" if task.status == "In Progress" else "In Progress"
+def toggle_task(current_user, id):
+    task = Task.query.filter_by(id=id, user_id=current_user.id).first()
+    if not task:
+        return jsonify({'message': 'Task not found'}), 404
+    task.status = "Completed" if task.status == "Pending" else "Pending"
     db.session.commit()
-    return jsonify({"status": task.status})
+    return jsonify({'status': task.status})
 
 
-@app.route("/tasks/<int:task_id>", methods=["DELETE"])
+@app.route('/tasks/<int:id>', methods=['DELETE'])
 @token_required
-def delete(current_user, task_id):
-    task = Task.query.filter_by(id=task_id, user_id=current_user.id).first()
-    if task:
-        db.session.delete(task)
-        db.session.commit()
-    return jsonify({"message": "Deleted"})
+def delete_task(current_user, id):
+    task = Task.query.filter_by(id=id, user_id=current_user.id).first()
+    if not task:
+        return jsonify({'message': 'Task not found'}), 404
+    db.session.delete(task)
+    db.session.commit()
+    return jsonify({'message': 'Deleted'})
 
 
-if __name__ == "__main__":
-    app.run(debug=True, port=5000)
+if __name__ == '__main__':
+    app.run(debug=True)
