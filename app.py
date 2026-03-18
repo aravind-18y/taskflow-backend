@@ -10,19 +10,22 @@ from functools import wraps
 app = Flask(__name__)
 
 # --- CONFIGURATION ---
-# 1. SECRET_KEY: Use environment variable or a fallback
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'taskflow_secure_2026')
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'taskflow_final_2026')
 
-# 2. DATABASE: Switch to PostgreSQL if DATABASE_URL exists (Render), else use SQLite
+# DATABASE: Automatically switches between Render Postgres and Local SQLite
 db_url = os.environ.get('DATABASE_URL', 'sqlite:///tasks.db')
 if db_url.startswith("postgres://"):
     db_url = db_url.replace("postgres://", "postgresql://", 1)
 app.config['SQLALCHEMY_DATABASE_URI'] = db_url
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
-# 3. CORS: Replace with your ACTUAL Vercel URL
-CORS(app, resources={
-     r"/*": {"origins": "https://taskflow-frontend-chi.vercel.app"}})
+# --- THE PERFECT CORS FIX ---
+# This allows your Vercel frontend to talk to Render without errors
+CORS(app, resources={r"/*": {
+    "origins": "*",
+    "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    "allow_headers": ["Content-Type", "x-access-token"]
+}})
 
 db = SQLAlchemy(app)
 bcrypt = Bcrypt(app)
@@ -41,8 +44,6 @@ class Task(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     title = db.Column(db.String(200), nullable=False)
     status = db.Column(db.String(20), default="Pending")
-    priority = db.Column(db.String(20), default="Medium")
-    category = db.Column(db.String(50), default="Personal")
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
 
 
@@ -57,38 +58,40 @@ def token_required(f):
     def decorated(*args, **kwargs):
         token = request.headers.get('x-access-token')
         if not token:
-            return jsonify({'message': 'Token is missing!'}), 401
+            return jsonify({'message': 'Token missing'}), 401
         try:
             data = jwt.decode(
                 token, app.config['SECRET_KEY'], algorithms=["HS256"])
-            current_user = User.query.filter_by(id=data['user_id']).first()
+            current_user = User.query.get(data['user_id'])
         except:
-            return jsonify({'message': 'Token is invalid!'}), 401
+            return jsonify({'message': 'Token invalid'}), 401
         return f(current_user, *args, **kwargs)
     return decorated
 
 # --- ROUTES ---
 
 
-@app.route('/register', methods=['POST'])
+@app.route('/register', methods=['POST', 'OPTIONS'])
 def register():
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
     data = request.get_json()
+    if User.query.filter_by(username=data['username']).first():
+        return jsonify({'message': 'User already exists'}), 400
     hashed_password = bcrypt.generate_password_hash(
         data['password']).decode('utf-8')
     new_user = User(username=data['username'], password=hashed_password)
-    try:
-        db.session.add(new_user)
-        db.session.commit()
-        return jsonify({'message': 'Registered successfully'}), 201
-    except:
-        return jsonify({'message': 'User already exists'}), 400
+    db.session.add(new_user)
+    db.session.commit()
+    return jsonify({'message': 'Registered successfully'}), 201
 
 
-@app.route('/login', methods=['POST'])
+@app.route('/login', methods=['POST', 'OPTIONS'])
 def login():
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
     data = request.get_json()
     user = User.query.filter_by(username=data['username']).first()
-    # FIXED: check_password_hash (Correct function name)
     if user and bcrypt.check_password_hash(user.password, data['password']):
         token = jwt.encode({
             'user_id': user.id,
@@ -98,33 +101,17 @@ def login():
     return jsonify({'message': 'Invalid credentials'}), 401
 
 
-@app.route('/tasks', methods=['GET'])
+@app.route('/tasks', methods=['GET', 'POST'])
 @token_required
-def get_tasks(current_user):
-    tasks = Task.query.filter_by(user_id=current_user.id).all()
-    return jsonify([{'id': t.id, 'title': t.title, 'status': t.status, 'priority': t.priority, 'category': t.category} for t in tasks])
-
-
-@app.route('/tasks', methods=['POST'])
-@token_required
-def create_task(current_user):
+def handle_tasks(current_user):
+    if request.method == 'GET':
+        tasks = Task.query.filter_by(user_id=current_user.id).all()
+        return jsonify([{'id': t.id, 'title': t.title, 'status': t.status} for t in tasks])
     data = request.get_json()
-    new_task = Task(title=data['title'], priority=data.get('priority', 'Medium'),
-                    category=data.get('category', 'Personal'), user_id=current_user.id)
+    new_task = Task(title=data['title'], user_id=current_user.id)
     db.session.add(new_task)
     db.session.commit()
     return jsonify({'id': new_task.id, 'title': new_task.title, 'status': new_task.status}), 201
-
-
-@app.route('/tasks/<int:id>/toggle', methods=['PUT'])
-@token_required
-def toggle_task(current_user, id):
-    task = Task.query.filter_by(id=id, user_id=current_user.id).first()
-    if not task:
-        return jsonify({'message': 'Task not found'}), 404
-    task.status = "Completed" if task.status == "Pending" else "Pending"
-    db.session.commit()
-    return jsonify({'status': task.status})
 
 
 @app.route('/tasks/<int:id>', methods=['DELETE'])
@@ -132,10 +119,10 @@ def toggle_task(current_user, id):
 def delete_task(current_user, id):
     task = Task.query.filter_by(id=id, user_id=current_user.id).first()
     if not task:
-        return jsonify({'message': 'Task not found'}), 404
+        return jsonify({'message': 'Not found'}), 404
     db.session.delete(task)
     db.session.commit()
-    return jsonify({'message': 'Deleted'})
+    return jsonify({'message': 'Deleted'}), 200
 
 
 if __name__ == '__main__':
