@@ -10,7 +10,9 @@ from functools import wraps
 app = Flask(__name__)
 
 # --- CONFIGURATION ---
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'taskflow_final_2026')
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY')
+if not app.config['SECRET_KEY']:
+    raise RuntimeError("SECRET_KEY environment variable is not set")
 
 db_url = os.environ.get('DATABASE_URL', 'sqlite:///tasks.db')
 if db_url.startswith("postgres://"):
